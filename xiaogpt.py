@@ -90,6 +90,7 @@ class MiGPT:
         self.this_mute_xiaoai = options['mute_xiaoai']
         self.keyword = options['keyword']
         self.end_prompt = options['end_prompt']
+        self.keep_chat = options['keep_chat']
         self.use_command = options['use_command']
         self.tts_command = self.hardware_command_dict(options['hardware'])
 
@@ -105,6 +106,12 @@ class MiGPT:
             "L17A": "7-3",
             "X08E": "7-3",
         }.get(hardware, "5-1")
+
+    async def test_command(self, value):
+        async with ClientSession() as session:
+            await self.init_miaccount(session)
+            self.session = session
+            await miio_command(self.miio_service, self.token_info['mi_did'], value)
 
     async def play_voice(self, value):
         async with ClientSession() as session:
@@ -132,27 +139,34 @@ class MiGPT:
                 if new_timestamp > self.last_timestamp:
                     self.last_timestamp = new_timestamp
                     query = last_record.get("query", "")
+                    # print(query)
+                    # 判断是否关掉对话
+                    if query == '关掉':
+                        break
+                    # 让触发词为小爱同学时执行持续性对话
+                    if query == "小爱同学" and self.keep_chat:
+                        await self.to_chat()
+                        break
                     # 判断包含关键词或不设置时触发
                     if self.keyword == '' or query.find(self.keyword) != -1:
                         # 强制停止小爱同学的回答（由于我的设备L05C无法监听到小爱是否在播放状态）
                         if self.use_command and self.this_mute_xiaoai:
                             await self.mina_service.player_pause(self.token_info['device_id'])
+                        if self.this_mute_xiaoai:
+                            await self.stop_if_xiaoai_is_playing()
+                        if self.mute_xiaoai:
+                            while True:
+                                is_playing = await self.get_if_xiaoai_is_playing()
+                                time.sleep(1)
+                                if not is_playing:
+                                    break
+                            self.this_mute_xiaoai = True
                         else:
-                            if self.this_mute_xiaoai:
-                                await self.stop_if_xiaoai_is_playing()
-                            if self.mute_xiaoai:
-                                while True:
-                                    is_playing = await self.get_if_xiaoai_is_playing()
-                                    time.sleep(1)
-                                    if not is_playing:
-                                        break
-                                self.this_mute_xiaoai = True
-                            else:
-                                await asyncio.sleep(8)
+                            await asyncio.sleep(8)
                         query = query.replace(self.keyword, "")
                         query = f"{query}，{self.end_prompt}"
                         # waiting for xiaomi_ai speaker done
-                        await self.do_tts("正在问ChatGPT,请耐心等待")
+                        # await self.do_tts("正在问ChatGPT,请耐心等待")
                         try:
                             print(
                                 "以下是小爱的回答: ",
@@ -167,9 +181,10 @@ class MiGPT:
                         #  tts to xiaomi_ai with ChatGPT answer
                         print("以下是ChatGPT的回答: " + message)
                         await self.do_tts(message)
-
-                        sleep_time = len(message) / 4
+                        sleep_time = len(message) / 3
                         time.sleep(sleep_time)
+                        if self.keep_chat:
+                            await xiaoGPT.test_command('5-4 小爱同学 0')
 
     async def init_all_data(self, session):
         await self.init_miaccount(session)
@@ -285,6 +300,7 @@ class MiGPT:
             # stop it
             await self.mina_service.player_pause(self.token_info['device_id'])
 
+
 if __name__ == "__main__":
     CONFIG_PATH = 'config.json'
     options = {
@@ -297,7 +313,8 @@ if __name__ == "__main__":
         "mute_xiaoai": True,
         "use_command": False,
         "keyword": "帮我",
-        "end_prompt": "请在50字以内回答"
+        "end_prompt": "请在50字以内回答",
+        "keep_chat": False
     }
     config = load_json()
     for key, value in config.items():

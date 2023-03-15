@@ -1,3 +1,4 @@
+import threading
 import asyncio
 import time
 import json
@@ -7,6 +8,7 @@ from requests.utils import cookiejar_from_dict
 from pathlib import Path
 from aiohttp import ClientSession
 from miservice import MiAccount, MiNAService, MiIOService, miio_command
+from V3 import Chatbot
 
 def load_json():
     if os.path.exists(CONFIG_PATH):
@@ -76,7 +78,7 @@ class MiGPT:
         self.session = None
         self.mina_service = None
         self.cookie = None
-        self.chat_box = None
+        self.chatbot = None
         # 配置信息
         self.last_ask_api = "https://userprofile.mina.mi.com/device_profile/v2/conversation?source=dialogu&hardware={hardware}&timestamp={timestamp}&limit=2"
         self.cookie_template = "deviceId={device_id}; serviceToken={service_token}; userId={user_id}"
@@ -86,13 +88,11 @@ class MiGPT:
         self.password = options['password']
         self.openai_key = options['openai_key']
         self.openai_baseurl = options['openai_baseurl']
-        self.mute_xiaoai = options['mute_xiaoai']
-        self.this_mute_xiaoai = options['mute_xiaoai']
-        self.keyword = options['keyword']
         self.end_prompt = options['end_prompt']
         self.keep_chat = options['keep_chat']
         self.use_command = options['use_command']
         self.tts_command = self.hardware_command_dict(options['hardware'])
+        self.proxy = options['proxy']
 
     def hardware_command_dict(self, hardware):
         return {
@@ -111,7 +111,7 @@ class MiGPT:
         async with ClientSession() as session:
             await self.init_miaccount(session)
             self.session = session
-            await miio_command(self.miio_service, self.token_info['mi_did'], value)
+            print(await miio_command(self.miio_service, self.token_info['mi_did'], value))
 
     async def play_voice(self, value):
         async with ClientSession() as session:
@@ -119,96 +119,177 @@ class MiGPT:
             self.session = session
             await self.do_tts(value)
 
+    async def mute_xiaoai(self):
+        # 强制停止小爱同学的回答（需要use_command的设备）
+        if self.use_command:
+            await self.mina_service.player_pause(self.token_info['device_id'])
+        else:
+            await self.stop_if_xiaoai_is_playing()
+    async def check_new_query(self, session):
+        try:
+            r = await self.get_latest_ask_from_xiaoai()
+        except Exception:
+            # we try to init all again
+            await self.init_all_data(session)
+            r = await self.get_latest_ask_from_xiaoai()
+        new_timestamp, last_record = self.get_last_timestamp_and_record(r)
+        if new_timestamp > self.last_timestamp:
+            return new_timestamp, last_record.get("query", "")
+        return False, None
     async def to_chat(self):
+        print('\033[1;33m' + '正在运行小爱同学GPT版本' + '\033[0m')
+        SWITCH = True
         async with ClientSession() as session:
             await self.init_all_data(session)
             while True:
                 try:
-                    r = await self.get_latest_ask_from_xiaomi()
+                    r = await self.get_latest_ask_from_xiaoai()
                 except Exception:
                     # we try to init all again
                     await self.init_all_data(session)
-                    r = await self.get_latest_ask_from_xiaomi()
+                    r = await self.get_latest_ask_from_xiaoai()
                     # spider rule
-                if not self.mute_xiaoai:
-                    await asyncio.sleep(3)
-                elif not self.use_command:
-                    await asyncio.sleep(0.3)
-
                 new_timestamp, last_record = self.get_last_timestamp_and_record(r)
                 if new_timestamp > self.last_timestamp:
                     self.last_timestamp = new_timestamp
                     query = last_record.get("query", "")
-                    # print(query)
-                    # 判断是否关掉对话
-                    if query == '关掉':
-                        break
-                    # 让触发词为小爱同学时执行持续性对话
-                    if query == "小爱同学" and self.keep_chat:
-                        await self.to_chat()
-                        break
-                    # 判断包含关键词或不设置时触发
-                    if self.keyword == '' or query.find(self.keyword) != -1:
-                        # 强制停止小爱同学的回答（由于我的设备L05C无法监听到小爱是否在播放状态）
-                        if self.use_command and self.this_mute_xiaoai:
-                            await self.mina_service.player_pause(self.token_info['device_id'])
-                        if self.this_mute_xiaoai:
-                            await self.stop_if_xiaoai_is_playing()
-                        if self.mute_xiaoai:
-                            while True:
-                                is_playing = await self.get_if_xiaoai_is_playing()
-                                time.sleep(1)
-                                if not is_playing:
-                                    break
-                            self.this_mute_xiaoai = True
+                    if query.startswith('闭嘴') or query.startswith('停止'):
+                        await self.stop_if_xiaoai_is_playing()
+                        continue
+                    if query.startswith('打开高级对话') or query.startswith('开启高级对话'):
+                        await self.mute_xiaoai()
+                        SWITCH = True
+                        print("\033[1;32m高级对话已开启\033[0m")
+                        if self.use_command:
+                            await miio_command(self.miio_service, self.token_info['mi_did'], '5-4 小爱同学 0')
                         else:
-                            await asyncio.sleep(8)
-                        query = query.replace(self.keyword, "")
+                            await self.do_tts("高级对话已开启")
+                        continue
+                    if query.startswith('关闭高级对话'):
+                        await self.mute_xiaoai()
+                        SWITCH = False
+                        print("\033[1;32m高级对话已关闭\033[0m")
+                        await self.do_tts("高级对话已关闭")
+                        continue
+                    # 让触发词为小爱同学时执行持续性对话
+                    if query.startswith("小爱同学") and self.keep_chat:
+                        continue
+                    # 判断包含关键词或不设置时触发
+                    if SWITCH:
+                        commas = 0
+                        wait_times = 3
+                        await self.mute_xiaoai()
                         query = f"{query}，{self.end_prompt}"
-                        # waiting for xiaomi_ai speaker done
-                        # await self.do_tts("正在问ChatGPT,请耐心等待")
+                        print('\033[1;34m' + "我: " + '\033[0m', end="")
+                        print(query)
+                        print('\033[1;34m' + "ChatGPT: " + '\033[0m', end="")
+                        lock = threading.Lock()
+                        stop_event = threading.Event()
+                        thread = threading.Thread(target=self.chatbot.ask_stream, args=(query, lock, stop_event,))
+                        thread.start()
+                        is_playing = False
+                        while True:
+                            success = lock.acquire(blocking=False)
+                            if success:  # 如果成功获取锁
+                                try:
+                                    this_sentence = self.chatbot.sentence  # 获取句子（目前的）
+                                    if this_sentence == "" and not thread.is_alive():
+                                        break
+                                    is_a_sentence = False
+                                    for x in (("，", "。", "？", "！", "；", ",", ".", "?", "!", ";")
+                                    if commas <= wait_times else ("。", "？", "！", "；", ".", "?", "!", ";")):
+                                        pos = this_sentence.rfind(x)
+                                        if pos != -1:
+                                            is_a_sentence = True
+                                            # 取出完整的句组，剩下的放回去
+                                            self.chatbot.sentence = this_sentence[pos + 1:]
+                                            this_sentence = this_sentence[:pos + 1]
+                                            break
+                                finally:
+                                    lock.release()
+                            else:
+                                time.sleep(0.01)
+                                continue
+                            if not is_a_sentence:
+                                time.sleep(0.01)
+                                continue
+                            if not await self.get_if_xiaoai_is_playing():
+                                if commas <= wait_times:
+                                    commas += sum([1 for x in this_sentence if
+                                                   x in {"，", "。", "？", "！", "；", ",", ".", "?", "!", ";"}]) + 1
+                                is_playing = True
+                                await self.do_tts(this_sentence)
+                                if self.use_command:
+                                    length = len(this_sentence)
+                                    if length < 5:
+                                        sleep_time = len(this_sentence) / 5
+                                    elif length < 10:
+                                        sleep_time = len(this_sentence) / 4
+                                    elif length < 20:
+                                        sleep_time = len(this_sentence) / 3
+                                    else:
+                                        sleep_time = len(this_sentence) / 2.5
+                                    time.sleep(sleep_time)
+                                    is_playing = False
+                                if self.use_command:
+                                    while is_playing and not \
+                                            (await self.check_new_query(session))[0]:
+                                        await asyncio.sleep(0.1)
+                                else:
+                                    while await self.get_if_xiaoai_is_playing() and not \
+                                            (await self.check_new_query(session))[0]:
+                                        await asyncio.sleep(0.1)
+                                time_stamp, query = await self.check_new_query(session)
+                                if time_stamp:
+                                    stop_event.set()
+                                    while True:
+                                        success = lock.acquire(blocking=False)
+                                        if success:
+                                            try:
+                                                self.chatbot.sentence = ""
+                                            finally:
+                                                lock.release()
+                                            break
+                                    await self.stop_if_xiaoai_is_playing()
+                                    await self.do_tts('')  # 空串施法打断
+                                    if not self.chatbot.has_printed:
+                                        print()
+                                    if query.startswith('闭嘴'):
+                                        self.last_timestamp = time_stamp
+                                        # 打印彩色信息
+                                        print('\033[1;34m' + 'INFO: ' + '\033[0m', end='')
+                                        print('\033[1;34m' + 'ChatGPT暂停回答' + '\033[0m')
+                                    else:
+                                        print('\033[1;34m' + 'INFO: ' + '\033[0m', end='')
+                                        print('\033[1;34m' + '有新的问答，ChatGPT停止当前回答' + '\033[0m')
+                                    break
+                        if self.keep_chat:
+                            await miio_command(self.miio_service, self.token_info['mi_did'], '5-4 小爱同学 0')
+                    else:
                         try:
                             print(
-                                "以下是小爱的回答: ",
+                                '\032[1;30m' + "小爱同学: " + '\032[0m',
                                 last_record.get("answers")[0]
                                 .get("tts", {})
                                 .get("text"),
                             )
                         except:
                             print("小爱没回")
-                        message = await self.chat_bot.ask(query)
-                        message = self._normalize(message)
-                        #  tts to xiaomi_ai with ChatGPT answer
-                        print("以下是ChatGPT的回答: " + message)
-                        await self.do_tts(message)
-                        sleep_time = len(message) / 3
-                        time.sleep(sleep_time)
-                        if self.keep_chat:
-                            await xiaoGPT.test_command('5-4 小爱同学 0')
 
     async def init_all_data(self, session):
         await self.init_miaccount(session)
-        # if self.token_info['user_id'] == None or self.token_info['token'] == None or self.token_info['device_id'] == None:
-        await self.account.login("micoapi")
-        await self.set_device_id()
-        with open(self.mi_token_home) as f:
-            user_data = json.loads(f.read())
-        self.token_info['user_id'] = user_data.get("userId")
-        self.token_info['token'] = user_data.get("micoapi")[1]
-        # 写入json文件
-        # config = load_json()
-        # config['token_info'] = self.token_info
-        # save_json(config)
-        token_info = self.token_info
-        self.session = session
-        self.cookie = self.cookie_template.format(
-            device_id=token_info['device_id'],
-            service_token=token_info['token'],
-            user_id=token_info['user_id']
-        )
-        data = await self.get_latest_ask_from_xiaomi()
+        if self.token_info['user_id'] == None or self.token_info['token'] == None or self.token_info['device_id'] == None:
+            await self.login()
+            self.session = session
+        try:
+            data = await self.get_latest_ask_from_xiaoai()
+        except:
+            self.token_info = {"user_id": None, "token": None, "device_id": None, "mi_did": None}
+            await self.login()
+            self.session = session
+            data = await self.get_latest_ask_from_xiaoai()
         self.last_timestamp, self.last_record = self.get_last_timestamp_and_record(data)
-        self.chat_bot = ChatGptBox(self.session, self.openai_key, self.openai_baseurl)
+        self.chatbot = Chatbot(api_key=self.openai_key, proxy=self.proxy, base_url=self.openai_baseurl)
 
     # 初始化
     async def init_miaccount(self, session):
@@ -221,6 +302,22 @@ class MiGPT:
         self.mina_service = MiNAService(self.account)
         self.miio_service = MiIOService(self.account)
 
+    async def login(self):
+        await self.account.login("micoapi")
+        await self.set_device_id()
+        with open(self.mi_token_home) as f:
+            user_data = json.loads(f.read())
+        self.token_info['user_id'] = user_data.get("userId")
+        self.token_info['token'] = user_data.get("micoapi")[1]
+        self.cookie = self.cookie_template.format(
+            device_id=self.token_info['device_id'],
+            service_token=self.token_info['token'],
+            user_id=self.token_info['user_id']
+        )
+        # 写入json文件
+        config = load_json()
+        config['token_info'] = self.token_info
+        save_json(config)
     # 获取设备ID
     async def set_device_id(self):
         if self.cookie:
@@ -248,7 +345,7 @@ class MiGPT:
             self.cookie = parse_cookie_string(cookie_string)
 
     # 获取最近一次对话
-    async def get_latest_ask_from_xiaomi(self):
+    async def get_latest_ask_from_xiaoai(self):
         r = await self.session.get(
             self.last_ask_api.format(
                 hardware=self.hardware, timestamp=str(int(time.time() * 1000)),
@@ -267,13 +364,6 @@ class MiGPT:
             last_record = records[0]
             timestamp = last_record.get("time")
             return timestamp, last_record
-
-    # 规范化
-    def _normalize(self, message):
-        message = message.replace(" ", "--")
-        message = message.replace("\n", "，")
-        message = message.replace('"', "，")
-        return message
 
     # 文字转语音
     async def do_tts(self, value):
@@ -310,11 +400,10 @@ if __name__ == "__main__":
         "password": "",
         "openai_key": "",
         "openai_baseurl": "https://api.openai.com",
-        "mute_xiaoai": True,
         "use_command": False,
-        "keyword": "帮我",
         "end_prompt": "请在50字以内回答",
-        "keep_chat": False
+        "keep_chat": False,
+        "proxy": None,
     }
     config = load_json()
     for key, value in config.items():
@@ -324,3 +413,4 @@ if __name__ == "__main__":
         raise Exception("Use chatgpt api need openai API key, please google how to")
     xiaoGPT = MiGPT(options)
     asyncio.run(xiaoGPT.to_chat())
+

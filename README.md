@@ -31,7 +31,7 @@
   "account": "", 
   "password": "", 
   "openai_key": "", 
-  "openai_baseurl": "https://openapi.ssiic.com", 
+  "openai_baseurl": "https://api.openai.com", 
   "use_command": false, 
   "keep_chat": true,
   "end_prompt": "请在50字以内回答"

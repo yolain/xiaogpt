@@ -138,7 +138,7 @@ class MiGPT:
         return False, None
     async def to_chat(self):
         print('\033[1;33m' + '正在运行小爱同学GPT版本' + '\033[0m')
-        SWITCH = True
+        SWITCH = False
         async with ClientSession() as session:
             await self.init_all_data(session)
             while True:

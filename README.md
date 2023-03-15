@@ -7,7 +7,8 @@
 ## 前言
 由于我的设备是L05C，使用
 [原项目](https://github.com/yihong0618/xiaogpt)
-大佬的版本会出现些许问题，想说自己简化一下。目前只引入了GPT3.5和增加持续唤醒小爱的功能。
+大佬的版本会出现些许问题，想说自己简化一下。目前替换成了流式对话的API也保留了持续唤醒小爱的功能。
+如果使用的是国内转发的baseurl是无法使用流式对话的，会按原来的方式输出结果。
 
 ## 原理 —— 大佬的灵光乍现
 
@@ -31,10 +32,8 @@
   "password": "", 
   "openai_key": "", 
   "openai_baseurl": "https://openapi.ssiic.com", 
-  "mute_xiaoai": false, 
   "use_command": false, 
   "keep_chat": true,
-  "keyword": "帮我", 
   "end_prompt": "请在50字以内回答"
 }
 ```
@@ -46,7 +45,7 @@ python xiaogpt.py
 
 
 # 感谢
-
 - [yihong0618](https://github.com/yihong0618/)
+- [Afool4U](https://github.com/Afool4U)
 - [xiaomi](https://www.mi.com/)
 - @[Yonsm](https://github.com/Yonsm) 的 [MiService](https://github.com/Yonsm/MiService) 
